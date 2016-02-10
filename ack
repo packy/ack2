@@ -3,7 +3,7 @@
 use strict;
 use warnings;
 
-our $VERSION = '2.15_01'; # Check http://beyondgrep.com/ for updates
+our $VERSION = '2.15_02'; # Check http://beyondgrep.com/ for updates
 
 use 5.008008;
 use Getopt::Long 2.38 ();
@@ -523,68 +523,24 @@ sub print_matches_in_resource {
             }
         }
         else {
-            # XXX unroll first match check ($has_printed_for_this_resource)
-            # XXX what if this is a *huge* file? (see also -l)
-            my $contents = do {
-                local $/;
-                <$fh>;
-            };
-
-            my $prev_match_end = 0;
-            my $line_no = 1;
-
-            $match_column_number = undef;
-            while ( $contents =~ /$opt_regex/og ) {
-                my $match_start = $-[0];
-                my $match_end   = $+[0];
-                next if $match_start == $match_end; # continue to the next line
-                                                    # if we match nothing, since
-                                                    # some regexes allow this
-                                                    # and would throw us into
-                                                    # an infinite loop
-
-                pos($contents)  = $prev_match_end;
-                $prev_match_end = $match_end;
-
-                while ( $contents =~ /\n/og && $-[0] < $match_start ) {
-                    $line_no++;
-                }
-
-                my $start_line = rindex($contents, "\n", $match_start);
-                my $end_line   = index($contents, "\n", $match_end);
-
-                if ( $start_line == -1 ) {
-                    $start_line = 0;
-                }
-                else {
-                    $start_line++;
-                }
-
-                if ( $end_line == -1 ) {
-                    $end_line = length($contents);
-                }
-                else {
-                    $end_line--;
-                }
-                $match_column_number = $match_start - $start_line + 1;
-                if ( !$has_printed_for_this_resource ) {
-                    if ( $opt_break && $has_printed_something ) {
-                        App::Ack::print_blank_line();
+            while ( <$fh> ) {
+                $match_column_number = undef;
+                if ( /$opt_regex/o ) {
+                    $match_column_number = $-[0] + 1;
+                    if ( !$has_printed_for_this_resource ) {
+                        if ( $opt_break && $has_printed_something ) {
+                            App::Ack::print_blank_line();
+                        }
+                        if ( $opt_show_filename && $opt_heading ) {
+                            App::Ack::print_filename( $display_filename, $ors );
+                        }
                     }
-                    if ( $opt_show_filename && $opt_heading ) {
-                        App::Ack::print_filename( $display_filename, $ors );
-                    }
+                    s/[\r\n]+$//g;
+                    print_line_with_options($opt, $filename, $_, $., ':');
+                    $has_printed_for_this_resource = 1;
+                    $nmatches++;
+                    $max_count--;
                 }
-                my $line = substr($contents, $start_line, $end_line - $start_line + 1);
-                $line =~ s/[\r\n]+$//g;
-                print_line_with_options($opt, $filename, $line, $line_no, ':');
-
-                pos($contents) = $end_line + 1;
-
-                $has_printed_for_this_resource = 1;
-                $nmatches++;
-                $max_count--;
-
                 last unless $max_count != 0;
             }
         }
@@ -645,9 +601,7 @@ sub print_line_with_options {
                     my $offset = 0; # additional offset for when we add stuff
                     my $previous_match_end = 0;
 
-                    last if $-[0] == $+[0]; # stop highlighting if we've hit an
-                                            # empty match, since continuing would
-                                            # result in an infinite loop
+                    last if $-[0] == $+[0];
 
                     for ( my $i = 1; $i < @+; $i++ ) {
                         my ( $match_start, $match_end ) = ( $-[$i], $+[$i] );
@@ -678,9 +632,7 @@ sub print_line_with_options {
                     $matched = 1;
                     my ( $match_start, $match_end ) = ($-[0], $+[0]);
                     next unless defined($match_start);
-                    last if $match_start == $match_end; # stop highlighting if we've hit an
-                                                        # empty match, since continuing would
-                                                        # result in an infinite loop
+                    last if $match_start == $match_end;
 
                     my $substring = substr( $line, $match_start,
                         $match_end - $match_start );
@@ -851,22 +803,11 @@ sub resource_has_match {
         }
     }
     else {
-        if ( $opt_v ) {
-            while ( <$fh> ) {
-                if (!/$opt_regex/o) {
-                    $has_match = 1;
-                    last;
-                }
+        while ( <$fh> ) {
+            if (/$opt_regex/o xor $opt_v) {
+                $has_match = 1;
+                last;
             }
-        }
-        else {
-            # XXX read in chunks
-            # XXX only do this for certain file sizes?
-            my $content = do {
-                local $/;
-                <$fh>;
-            };
-            $has_match = $content =~ /$opt_regex/o;
         }
         close $fh;
     }
@@ -885,17 +826,8 @@ sub count_matches_in_resource {
         }
     }
     else {
-        if ( $opt_v ) {
-            while ( <$fh> ) {
-                ++$nmatches if (!/$opt_regex/o);
-            }
-        }
-        else {
-            my $content = do {
-                local $/;
-                <$fh>;
-            };
-            $nmatches =()= ($content =~ /$opt_regex/og);
+        while ( <$fh> ) {
+            ++$nmatches if (/$opt_regex/o xor $opt_v);
         }
         close $fh;
     }
@@ -1950,13 +1882,19 @@ them here.
 
 =head2 Why isn't ack finding a match in (some file)?
 
-Probably because it's of a type that ack doesn't recognize.  ack's
-searching behavior is driven by filetype.  B<If ack doesn't know
-what kind of file it is, ack ignores the file.>
+First, take a look and see if ack is even looking at the file.  ack is
+intelligent in what files it will search and which ones it won't, but
+sometimes that can be surprising.
 
-Use the C<-f> switch to see a list of files that ack will search
-for you.  You can use the C<--show-types> switch to show which type
-ack thinks each file is.
+Use the C<-f> switch, with no regex, to see a list of files that ack
+will search for you.  If your file doesn't show up in the list of files
+that C<ack -f> shows, then ack never looks in it.
+
+NOTE: If you're using an old ack before 2.0, it's probably because it's of
+a type that ack doesn't recognize.  In ack 1.x, the searching behavior is
+driven by filetype.  B<If ack 1.x doesn't know what kind of file it is,
+ack ignores the file.>  You can use the C<--show-types> switch to show
+which type ack thinks each file is.
 
 =head2 Wouldn't it be great if F<ack> did search & replace?
 
@@ -2303,6 +2241,8 @@ L<https://github.com/petdance/ack2>
 How appropriate to have I<ack>nowledgements!
 
 Thanks to everyone who has contributed to ack in any way, including
+SE<eacute>bastien FeugE<egrave>re,
+Jakub Wilk,
 Pete Houston,
 Stephen Thirlwall,
 Jonah Bishop,
